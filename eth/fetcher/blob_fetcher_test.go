@@ -19,6 +19,7 @@ package fetcher
 import (
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -779,6 +780,20 @@ func TestBlobFetcherFetchTimeout(t *testing.T) {
 	})
 }
 
+// settle waits until the fetcher loop has no more work queued. The loop sends a
+// step notification after every iteration and only wakes up on events, so a
+// pause in the notifications means it is parked in its select and the test can
+// inspect its state without racing the loop goroutine.
+func settle(wait chan struct{}) {
+	for {
+		select {
+		case <-wait:
+		case <-time.After(10 * time.Millisecond):
+			return
+		}
+	}
+}
+
 // testBlobFetcher is the generic test runner for blob fetcher tests
 func testBlobFetcher(t *testing.T, tt blobFetcherTest) {
 	clock := new(mclock.Simulated)
@@ -804,10 +819,6 @@ func testBlobFetcher(t *testing.T, tt blobFetcherTest) {
 
 	// Iterate through all the test steps and execute them
 	for i, step := range tt.steps {
-		// Clear the channel if anything is left over
-		for len(wait) > 0 {
-			<-wait
-		}
 		// Process the next step of the test
 		switch step := step.(type) {
 		case doBlobNotify:
@@ -815,14 +826,16 @@ func testBlobFetcher(t *testing.T, tt blobFetcherTest) {
 				t.Errorf("step %d: failed to notify fetcher: %v", i, err)
 				return
 			}
-			<-wait
+			<-wait // the iteration handling the step is done
+			settle(wait)
 
 		case doBlobEnqueue:
 			if err := fetcher.Enqueue(step.peer, step.hashes, step.cells, step.custody); err != nil {
 				t.Errorf("step %d: failed to enqueue blobs: %v", i, err)
 				return
 			}
-			<-wait
+			<-wait // the iteration handling the step is done
+			settle(wait)
 
 		case blobDoFunc:
 			step(fetcher)
@@ -1052,14 +1065,15 @@ func testBlobFetcher(t *testing.T, tt blobFetcherTest) {
 		case doWait:
 			clock.Run(step.time)
 			if step.step {
-				<-wait
+				settle(wait)
 			}
 
 		case doDrop:
 			if err := fetcher.Drop(string(step)); err != nil {
 				t.Errorf("step %d: %v", i, err)
 			}
-			<-wait
+			<-wait // the iteration handling the step is done
+			settle(wait)
 
 		default:
 			t.Errorf("step %d: unknown step type %T", i, step)
